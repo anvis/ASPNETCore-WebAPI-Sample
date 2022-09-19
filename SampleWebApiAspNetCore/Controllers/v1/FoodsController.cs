@@ -1,40 +1,49 @@
-﻿using AutoMapper;
+﻿using System;
+using System.Linq;
+using AutoMapper;
+using SampleWebApiAspNetCore.Dtos;
 using Microsoft.AspNetCore.JsonPatch;
 using Microsoft.AspNetCore.Mvc;
-using SampleWebApiAspNetCore.Dtos;
-using SampleWebApiAspNetCore.Entities;
-using SampleWebApiAspNetCore.Helpers;
-using SampleWebApiAspNetCore.Services;
-using SampleWebApiAspNetCore.Models;
 using SampleWebApiAspNetCore.Repositories;
+using System.Collections.Generic;
+using SampleWebApiAspNetCore.Entities;
+using SampleWebApiAspNetCore.Models;
+using SampleWebApiAspNetCore.Helpers;
 using System.Text.Json;
-using System;
-using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
+using System.Threading.Tasks;
+using Honeywell.HCECBP.FindApiServiceClient.Client;
 
-namespace SampleWebApiAspNetCore.Controllers.v1
+namespace SampleWebApiAspNetCore.v1.Controllers
 {
     [ApiController]
     [ApiVersion("1.0")]
     [Route("api/v{version:apiVersion}/[controller]")]
+    //[Route("api/[controller]")]
     public class FoodsController : ControllerBase
     {
         private readonly IFoodRepository _foodRepository;
+        private readonly IUrlHelper _urlHelper;
         private readonly IMapper _mapper;
-        private readonly ILinkService<FoodsController> _linkService;
+
+        private readonly IFindApiClient _findApiClient;
 
         public FoodsController(
+            IUrlHelper urlHelper,
             IFoodRepository foodRepository,
-            IMapper mapper,
-            ILinkService<FoodsController> linkService)
+            IMapper mapper, IFindApiClient findApiClient)
         {
+            _findApiClient = findApiClient;
             _foodRepository = foodRepository;
             _mapper = mapper;
-            _linkService = linkService;
+            _urlHelper = urlHelper;
         }
 
         [HttpGet(Name = nameof(GetAllFoods))]
-        public ActionResult GetAllFoods(ApiVersion version, [FromQuery] QueryParameters queryParameters)
+        public async Task<ActionResult> GetAllFoods(ApiVersion version, [FromQuery] QueryParameters queryParameters)
         {
+            var meaningsResponse = await _findApiClient.GetMeaningsAsync("id06ac58af-8fa7-479a-9ecc-bacec7c435af", fieldId, etag)
+                .ConfigureAwait(false);
+
             List<FoodEntity> foodItems = _foodRepository.GetAll(queryParameters).ToList();
 
             var allItemCount = _foodRepository.Count();
@@ -49,8 +58,9 @@ namespace SampleWebApiAspNetCore.Controllers.v1
 
             Response.Headers.Add("X-Pagination", JsonSerializer.Serialize(paginationMetadata));
 
-            var links = _linkService.CreateLinksForCollection(queryParameters, allItemCount, version);
-            var toReturn = foodItems.Select(x => _linkService.ExpandSingleFoodItem(x, x.Id, version));
+            var links = CreateLinksForCollection(queryParameters, allItemCount, version);
+
+            var toReturn = foodItems.Select(x => ExpandSingleFoodItem(x, version));
 
             return Ok(new
             {
@@ -70,9 +80,7 @@ namespace SampleWebApiAspNetCore.Controllers.v1
                 return NotFound();
             }
 
-            FoodDto item = _mapper.Map<FoodDto>(foodItem);
-
-            return Ok(_linkService.ExpandSingleFoodItem(item, item.Id, version));
+            return Ok(ExpandSingleFoodItem(foodItem, version));
         }
 
         [HttpPost(Name = nameof(AddFood))]
@@ -93,15 +101,14 @@ namespace SampleWebApiAspNetCore.Controllers.v1
             }
 
             FoodEntity newFoodItem = _foodRepository.GetSingle(toAdd.Id);
-            FoodDto foodDto = _mapper.Map<FoodDto>(newFoodItem);
 
             return CreatedAtRoute(nameof(GetSingleFood),
                 new { version = version.ToString(), id = newFoodItem.Id },
-                _linkService.ExpandSingleFoodItem(foodDto, foodDto.Id, version));
+                _mapper.Map<FoodDto>(newFoodItem));
         }
 
         [HttpPatch("{id:int}", Name = nameof(PartiallyUpdateFood))]
-        public ActionResult<FoodDto> PartiallyUpdateFood(ApiVersion version, int id, [FromBody] JsonPatchDocument<FoodUpdateDto> patchDoc)
+        public ActionResult<FoodDto> PartiallyUpdateFood(int id, [FromBody] JsonPatchDocument<FoodUpdateDto> patchDoc)
         {
             if (patchDoc == null)
             {
@@ -133,9 +140,7 @@ namespace SampleWebApiAspNetCore.Controllers.v1
                 throw new Exception("Updating a fooditem failed on save.");
             }
 
-            FoodDto foodDto = _mapper.Map<FoodDto>(updated);
-
-            return Ok(_linkService.ExpandSingleFoodItem(foodDto, foodDto.Id, version));
+            return Ok(_mapper.Map<FoodDto>(updated));
         }
 
         [HttpDelete]
@@ -161,7 +166,7 @@ namespace SampleWebApiAspNetCore.Controllers.v1
 
         [HttpPut]
         [Route("{id:int}", Name = nameof(UpdateFood))]
-        public ActionResult<FoodDto> UpdateFood(ApiVersion version, int id, [FromBody] FoodUpdateDto foodUpdateDto)
+        public ActionResult<FoodDto> UpdateFood(int id, [FromBody] FoodUpdateDto foodUpdateDto)
         {
             if (foodUpdateDto == null)
             {
@@ -184,9 +189,7 @@ namespace SampleWebApiAspNetCore.Controllers.v1
                 throw new Exception("Updating a fooditem failed on save.");
             }
 
-            FoodDto foodDto = _mapper.Map<FoodDto>(existingFoodItem);
-
-            return Ok(_linkService.ExpandSingleFoodItem(foodDto, foodDto.Id, version));
+            return Ok(_mapper.Map<FoodDto>(existingFoodItem));
         }
 
         [HttpGet("GetRandomMeal", Name = nameof(GetRandomMeal))]
@@ -194,18 +197,119 @@ namespace SampleWebApiAspNetCore.Controllers.v1
         {
             ICollection<FoodEntity> foodItems = _foodRepository.GetRandomMeal();
 
-            IEnumerable<FoodDto> dtos = foodItems.Select(x => _mapper.Map<FoodDto>(x));
+            IEnumerable<FoodDto> dtos = foodItems
+                .Select(x => _mapper.Map<FoodDto>(x));
 
             var links = new List<LinkDto>();
 
             // self 
-            links.Add(new LinkDto(Url.Link(nameof(GetRandomMeal), null), "self", "GET"));
+            links.Add(new LinkDto(_urlHelper.Link(nameof(GetRandomMeal), null), "self", "GET"));
 
             return Ok(new
             {
                 value = dtos,
                 links = links
             });
+        }
+
+        private List<LinkDto> CreateLinksForCollection(QueryParameters queryParameters, int totalCount, ApiVersion version)
+        {
+            var links = new List<LinkDto>();
+
+            // self 
+            links.Add(new LinkDto(_urlHelper.Link(nameof(GetAllFoods), new
+            {
+                pagecount = queryParameters.PageCount,
+                page = queryParameters.Page,
+                orderby = queryParameters.OrderBy
+            }), "self", "GET"));
+
+            links.Add(new LinkDto(_urlHelper.Link(nameof(GetAllFoods), new
+            {
+                pagecount = queryParameters.PageCount,
+                page = 1,
+                orderby = queryParameters.OrderBy
+            }), "first", "GET"));
+
+            links.Add(new LinkDto(_urlHelper.Link(nameof(GetAllFoods), new
+            {
+                pagecount = queryParameters.PageCount,
+                page = queryParameters.GetTotalPages(totalCount),
+                orderby = queryParameters.OrderBy
+            }), "last", "GET"));
+
+            if (queryParameters.HasNext(totalCount))
+            {
+                links.Add(new LinkDto(_urlHelper.Link(nameof(GetAllFoods), new
+                {
+                    pagecount = queryParameters.PageCount,
+                    page = queryParameters.Page + 1,
+                    orderby = queryParameters.OrderBy
+                }), "next", "GET"));
+            }
+
+            if (queryParameters.HasPrevious())
+            {
+                links.Add(new LinkDto(_urlHelper.Link(nameof(GetAllFoods), new
+                {
+                    pagecount = queryParameters.PageCount,
+                    page = queryParameters.Page - 1,
+                    orderby = queryParameters.OrderBy
+                }), "previous", "GET"));
+            }
+
+            var posturl = _urlHelper.Link(nameof(AddFood), new { version = version.ToString() });
+
+            links.Add(
+               new LinkDto(posturl,
+               "create_food",
+               "POST"));
+
+            return links;
+        }
+
+        private dynamic ExpandSingleFoodItem(FoodEntity foodItem, ApiVersion version)
+        {
+            var links = GetLinks(foodItem.Id, version);
+            FoodDto item = _mapper.Map<FoodDto>(foodItem);
+
+            var resourceToReturn = item.ToDynamic() as IDictionary<string, object>;
+            resourceToReturn.Add("links", links);
+
+            return resourceToReturn;
+        }
+
+        private IEnumerable<LinkDto> GetLinks(int id, ApiVersion version)
+        {
+            var links = new List<LinkDto>();
+
+            var getLink = _urlHelper.Link(nameof(GetSingleFood), new { version = version.ToString(), id = id });
+
+            links.Add(
+              new LinkDto(getLink, "self", "GET"));
+
+            var deleteLink = _urlHelper.Link(nameof(RemoveFood), new { version = version.ToString(), id = id });
+
+            links.Add(
+              new LinkDto(deleteLink,
+              "delete_food",
+              "DELETE"));
+
+            var createLink = _urlHelper.Link(nameof(AddFood), new { version = version.ToString() });
+
+            links.Add(
+              new LinkDto(createLink,
+              "create_food",
+              "POST"));
+
+            var updateLink = _urlHelper.Link(nameof(UpdateFood), new { version = version.ToString(), id = id });
+
+            links.Add(
+               new LinkDto(updateLink,
+               "update_food",
+               "PUT"));
+
+            return links;
         }
     }
 }

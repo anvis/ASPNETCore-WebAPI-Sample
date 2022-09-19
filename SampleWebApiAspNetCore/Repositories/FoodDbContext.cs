@@ -6,10 +6,12 @@ namespace SampleWebApiAspNetCore.Repositories
     public class FoodDbContext : DbContext
     {
         public FoodDbContext(DbContextOptions<FoodDbContext> options)
-            : base(options)
+           : base(options)
         {
+
         }
 
-        public DbSet<FoodEntity> FoodItems { get; set; } = null!;
+        public DbSet<FoodEntity> FoodItems { get; set; }
+
     }
 }

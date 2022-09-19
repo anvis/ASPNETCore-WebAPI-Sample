@@ -56,6 +56,13 @@ namespace SampleWebApiAspNetCore.Repositories
                 .Take(queryParameters.PageCount);
         }
 
+        public IQueryable<FoodEntity> GetAll()
+        {
+            IQueryable<FoodEntity> _allItems = _foodDbContext.FoodItems;
+            return _allItems;
+
+        }
+
         public int Count()
         {
             return _foodDbContext.FoodItems.Count();
